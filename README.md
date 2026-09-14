@@ -111,84 +111,21 @@ python manage.py check
 python manage.py runserver 0.0.0.0:8000
 ```
 
-接口文档：`http://127.0.0.1:8000/api/docs/`；健康检查：`http://127.0.0.1:8000/healthz/`。
+API 文档：
 
-## 快速启动：Docker Compose
+- Swagger UI：`http://127.0.0.1:8000/api/docs/`
+- OpenAPI Schema：`http://127.0.0.1:8000/api/schema/`
 
-确保 Docker Desktop 已启动：
+## 核心流程
 
-```cmd
-docker compose up -d --build
-```
+1) 上传 PDF：`POST /api/documents/`
+2) 解析与切分：`POST /api/documents/{id}/parse/`
+3) 向量化入库：`POST /api/qa/embed/{document_id}/`
+4) 提问：`POST /api/qa/ask/`
 
-该 Compose 环境包含 Django 后端、Vue3 + Nginx 前端、Milvus Standalone、Etcd、MinIO、Neo4j 和 Redis。
+更多说明见 [backend_api.md](docs/backend_api.md)。Milvus 默认是向量后端，集合首次向量化时自动创建并使用 HNSW；本地开发时可将 `VECTOR_BACKEND=faiss`，或保留 `MILVUS_FALLBACK_TO_FAISS=1` 作为离线兜底。
 
-访问：
-
-- 前端：`http://localhost/`
-- 后端：`http://localhost:8000/healthz/`
-- Neo4j Browser：`http://localhost:7474/`
-- Milvus：`localhost:19530`
-
-## Milvus 配置
-
-```dotenv
-VECTOR_BACKEND=milvus
-MILVUS_URI=http://127.0.0.1:19530
-MILVUS_COLLECTION=public_health_chunks
-MILVUS_HNSW_M=32
-MILVUS_HNSW_EF_CONSTRUCTION=200
-MILVUS_HNSW_EF=64
-MILVUS_FALLBACK_TO_FAISS=1
-```
-
-首次调用文档向量化接口时，服务会自动创建集合和 HNSW 索引。重新向量化同一文档时，会先清理旧 chunk，避免重复召回。Milvus 不可用时可切换 `VECTOR_BACKEND=faiss`，或使用 FAISS 降级配置。
-
-## API 主流程
-
-```text
-POST /api/documents/                         上传 PDF
-POST /api/documents/{id}/parse/              解析并切分
-POST /api/qa/embed/{document_id}/            向量化入库
-POST /api/kg/build/{document_id}/            构建 Neo4j 图谱
-POST /api/qa/ask/                            双路检索问答
-GET  /api/qa/ollama/status/                  模型服务状态
-```
-
-## CI/CD 与 AWS
-
-```mermaid
-flowchart LR
-    G[git push main] --> C[GitHub Actions]
-    C --> T[Django check / test]
-    T --> F[Frontend build]
-    F --> I[Docker build]
-    I --> E[Push to AWS ECR]
-    E --> S[Update ECS Fargate]
-    S --> H[ALB /healthz/]
-```
-
-`.github/workflows/ci-cd.yml` 在 `main` 分支执行测试、前端构建、Docker 镜像构建、ECR 推送和 ECS 滚动发布。AWS 认证使用 OIDC 临时凭证，不在 GitHub 中保存长期 Access Key。
-
-需要配置：
-
-```text
-Secret: AWS_DEPLOY_ROLE_ARN
-Variables: AWS_REGION, ECR_REPOSITORY, ECS_CLUSTER, ECS_SERVICE, ECS_TASK_DEFINITION
-```
-
-详细 Terraform 配置见 `infra/`，部署说明见 `docs/aws_deployment.md`。
-
-## 重点
-
-- Milvus 负责语义召回，Neo4j 负责实体关系和多跳推理。
-- Router / Retriever / Answer / Reviewer 按职责拆分多 Agent 流程。
-- Function Calling 根据意图动态选择检索、规则和外部 API 工具。
-- 同步 SDK 通过 `asyncio.to_thread` 放入线程池，并用 `asyncio.gather` 并发执行。
-- 医疗知识通过 Milvus、Neo4j 和规则引擎保持可更新、可追溯，不直接固化到模型参数。
-- 从本地 Docker Compose 迁移到 AWS ECS Fargate，并通过 GitHub Actions 实现持续交付。
-
-项目当前代码提供可运行的工程基线；准确率、吞吐量和端到端延迟等指标需要基于真实测试集和压测结果填写。
+MAS 中 Router/Retriever 先完成规划，随后工具执行阶段通过 `asyncio.gather` + `asyncio.to_thread` 并发调用独立的 Milvus、Neo4j、规则引擎和外部 API，最后由 Answer/Reviewer 汇总校验。
 
 ## 目录结构
 
