@@ -1,0 +1,18 @@
+.env
+infra/terraform.tfvars
+infra/.terraform/
+infra/terraform.tfstate*
+__pycache__/
+*.pyc
+.venv/
+data/
+media/
+*.sqlite3
+*.pdf
+staticfiles/
+frontend/dist/
+node_modules/
+docs/
+
+# Docker and local runtime data
+*.log
