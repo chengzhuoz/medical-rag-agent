@@ -1,0 +1,3 @@
+interface:
+  display_name: "Medical Web Research"
+  short_description: "检索并核验医疗公开网页来源"

@@ -160,6 +160,12 @@ OLLAMA_ANSWER_MODEL = os.getenv("OLLAMA_ANSWER_MODEL", "deepseek-r1:8b") or OLLA
 
 # 是否启用多智能体编排（关闭时退化为旧的单步 RAG）
 MAS_ENABLED = _env_bool("MAS_ENABLED", True)
+# Agent 工具执行治理：单请求最大工具数、线程池并发度和单工具超时（秒）
+MAS_MAX_TOOL_CALLS = int(os.getenv("MAS_MAX_TOOL_CALLS", "4"))
+MAS_TOOL_MAX_CONCURRENCY = int(os.getenv("MAS_TOOL_MAX_CONCURRENCY", "4"))
+MAS_TOOL_TIMEOUT_SECONDS = float(os.getenv("MAS_TOOL_TIMEOUT_SECONDS", "12"))
+WEB_SEARCH_ENABLED = _env_bool("WEB_SEARCH_ENABLED", True)
+WEB_SEARCH_TIMEOUT_SECONDS = float(os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "8"))
 # GraphRAG 多跳深度（1~3）
 GRAPH_HOPS = int(os.getenv("GRAPH_HOPS", "2"))
 

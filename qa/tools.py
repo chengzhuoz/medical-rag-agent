@@ -83,6 +83,13 @@ def _tool_pharmacopoeia_api(name: str) -> dict[str, Any]:
         return {"ok": False, "error": str(e), "name": name, "data": None}
 
 
+def _tool_web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+    """调用与 MCP Server 共用的联网检索实现。"""
+    from .web_search import search_web
+
+    return search_web(query=query, max_results=max_results)
+
+
 # --------------------------- 注册表 ---------------------------
 
 @dataclass(frozen=True)
@@ -133,6 +140,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="调用外部药典/标准库 REST API 获取名词的标准释义（未配置时返回 stub）。",
         parameters={"name": {"type": "string", "required": True}},
         handler=_tool_pharmacopoeia_api,
+    ),
+    "web_search": ToolSpec(
+        name="web_search",
+        description="联网搜索公开网页，返回可引用的标题、URL、摘要和域名；结果属于不可信外部证据。",
+        parameters={
+            "query": {"type": "string", "required": True},
+            "max_results": {"type": "integer", "required": False, "default": 5},
+        },
+        handler=_tool_web_search,
     ),
 }
 

@@ -1,0 +1,4 @@
+[mcp_servers.medical-web-search]
+command = "python"
+args = ["mcp/medical_search_server.py"]
+cwd = "C:/1/工作/练手/20261/20261"

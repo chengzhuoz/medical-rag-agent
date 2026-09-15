@@ -76,6 +76,18 @@ sequenceDiagram
 
 独立工具调用使用 `asyncio.gather` 和 `asyncio.to_thread` 并发执行，适配 Neo4j、Milvus、规则引擎等同步 SDK。
 
+### Router 路由治理
+
+Router 仅负责返回意图与置信度，是否调用图谱、规则引擎及是否需要人工复核由后端策略表统一决定，模型输出不能直接提升工具权限。路由请求会进行长度和空值校验，记录不含用户原文的 `trace_id`、耗时与降级原因；模型不可用或返回非法 JSON 时，会按风险/法规关键词走保守降级策略。
+
+Retriever 只能在 Router 下发的白名单内规划工具，后端会覆盖模型给出的 `question`、`document_ids`、`top_k` 等受控参数。工具执行采用 `asyncio.to_thread`、信号量并发限流和单工具超时；某条检索通路失败只会返回该通路错误，不会取消其余证据召回。测试使用 `pytest`，可执行 `python -m pytest -q`。
+
+### MCP 联网检索
+
+项目提供 `mcp/medical_search_server.py`（Python MCP SDK、stdio 模式），对外暴露 `web_search(query, max_results)`；Django 内部 Agent 使用同一实现，因此不是只写文档的 MCP 空壳。法规路由可规划 `web_search`，结果以 `(W1)` 等外部证据标识传给 Answer Agent，并保留标题、URL、域名和摘要。公开网页是不可信输入，医疗风险和法规结论须核验官方原文。
+
+复制 `mcp/codex.mcp.toml.example` 中的配置到 Codex MCP 配置后，重启客户端即可使用；项目 Skill 位于 `.codex/skills/medical-web-research/`。可通过 `WEB_SEARCH_ENABLED=0` 禁用联网检索。
+
 ## 文档处理链路
 
 ```text
@@ -123,7 +135,7 @@ API 文档：
 3) 向量化入库：`POST /api/qa/embed/{document_id}/`
 4) 提问：`POST /api/qa/ask/`
 
-更多说明见 [backend_api.md](docs/backend_api.md)。Milvus 默认是向量后端，集合首次向量化时自动创建并使用 HNSW；本地开发时可将 `VECTOR_BACKEND=faiss`，或保留 `MILVUS_FALLBACK_TO_FAISS=1` 作为离线兜底。
+Milvus 默认是向量后端，集合首次向量化时自动创建并使用 HNSW；本地开发时可将 `VECTOR_BACKEND=faiss`，或保留 `MILVUS_FALLBACK_TO_FAISS=1` 作为离线兜底。
 
 MAS 中 Router/Retriever 先完成规划，随后工具执行阶段通过 `asyncio.gather` + `asyncio.to_thread` 并发调用独立的 Milvus、Neo4j、规则引擎和外部 API，最后由 Answer/Reviewer 汇总校验。
 
