@@ -107,8 +107,8 @@ PDF 上传 → 文本解析 / OCR → Recursive Chunking
 | 向量检索 | Milvus、HNSW、Sentence Transformers |
 | 图谱检索 | Neo4j、Cypher、GraphRAG |
 | Agent | Router、Retriever、Answer、Reviewer、Function Calling |
-| 基础设施 | Docker Compose、Terraform、AWS ECS Fargate、ALB、ECR |
-| 自动化 | GitHub Actions、AWS OIDC、CloudWatch Logs |
+| 基础设施 | Docker Compose |
+| 自动化 | GitHub Actions |
 
 ## 快速启动：本地 Python
 
@@ -135,6 +135,19 @@ API 文档：
 3) 向量化入库：`POST /api/qa/embed/{document_id}/`
 4) 提问：`POST /api/qa/ask/`
 
+## 阿里云 ECS 自动部署
+
+主分支推送后，GitHub Actions 会先执行 Django 测试与 Vue 构建，再通过 SSH 将发布包传到 ECS，使用 `docker-compose.aliyun.yml` 构建并更新服务。发布采用独立版本镜像与健康检查，失败时自动恢复上一版本。
+
+1. 立即撤销任何曾公开粘贴或提交过的 SSH 私钥，重新生成专用部署密钥，并只把公钥加入服务器 `authorized_keys`。
+2. 首次在 ECS 上以管理员身份运行 `sudo bash scripts/bootstrap_aliyun.sh <部署用户名>`，安装 Docker 与 Compose 插件并创建 `/opt/medical-rag`。
+3. 复制 `.env.aliyun.example`，替换其中所有 `replace-with-...` 值，将完整内容保存为 GitHub Environment `production` 的 Secret：`ALIYUN_DEPLOY_ENV_FILE`。
+4. 在 GitHub Environment `production` 添加 Secret：`ALIYUN_SSH_PRIVATE_KEY`、`ALIYUN_SSH_KNOWN_HOSTS`。
+5. 按需添加 Variables：`ALIYUN_HOST`（默认 `8.163.67.245`）、`ALIYUN_USER`（默认 `root`）、`ALIYUN_SSH_PORT`（默认 `22`）、`ALIYUN_DEPLOY_PATH`（默认 `/opt/medical-rag`）。
+6. 阿里云安全组仅开放部署机所需的 SSH 端口，并开放业务端口 `80`；生产环境建议配置域名、HTTPS 与最小来源范围。
+
+服务器主机公钥必须从可信控制台核验后写入 `ALIYUN_SSH_KNOWN_HOSTS`，不要在 CI 中使用跳过主机校验的参数。联网搜索由 Django Agent 与 `mcp/medical_search_server.py` 共用实现，生产环境通过 `WEB_SEARCH_ENABLED=1` 启用。
+
 Milvus 默认是向量后端，集合首次向量化时自动创建并使用 HNSW；本地开发时可将 `VECTOR_BACKEND=faiss`，或保留 `MILVUS_FALLBACK_TO_FAISS=1` 作为离线兜底。
 
 MAS 中 Router/Retriever 先完成规划，随后工具执行阶段通过 `asyncio.gather` + `asyncio.to_thread` 并发调用独立的 Milvus、Neo4j、规则引擎和外部 API，最后由 Answer/Reviewer 汇总校验。
@@ -149,7 +162,6 @@ MAS 中 Router/Retriever 先完成规划，随后工具执行阶段通过 `async
 ├── monitoring/               任务状态和日志
 ├── frontend/                 Vue3 前端
 ├── Milvus/                   Milvus 使用说明
-├── infra/                    AWS Terraform 基础设施
 ├── scripts/                  本地 Smoke Test 与部署脚本
 ├── Dockerfile                后端镜像
 ├── docker-compose.yml        本地完整服务栈

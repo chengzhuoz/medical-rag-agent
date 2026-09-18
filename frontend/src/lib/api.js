@@ -1,4 +1,7 @@
-const baseUrl = () => (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
+const baseUrl = () => {
+  const fallback = import.meta.env.DEV ? 'http://127.0.0.1:8000' : window.location.origin
+  return (import.meta.env.VITE_API_BASE_URL || fallback).replace(/\/+$/, '')
+}
 
 const joinUrl = (p) => {
   const path = String(p || '').replace(/^\/+/, '')
@@ -70,11 +73,11 @@ export function kgSubgraph(center, limit = 80) {
   return apiFetch(`/api/kg/subgraph/?center=${encodeURIComponent(center)}&limit=${encodeURIComponent(limit)}`)
 }
 
-export function askQuestion({ question, document_ids, top_k }) {
+export function askQuestion({ question, document_ids, top_k, use_vector = true, use_graph = true, use_web = true }) {
   return apiFetch('/api/qa/ask/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, document_ids, top_k })
+    body: JSON.stringify({ question, document_ids, top_k, use_vector, use_graph, use_web })
   })
 }
 

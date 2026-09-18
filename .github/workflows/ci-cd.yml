@@ -1,21 +1,22 @@
-name: CI/CD
+name: CI/CD - Aliyun ECS
 
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
-  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
-  ECS_TASK_DEFINITION: ${{ vars.ECS_TASK_DEFINITION }}
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
 
 jobs:
   test:
@@ -23,49 +24,76 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - run: pip install -r requirements.txt
-      - run: python manage.py check
-      - run: python manage.py test
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+      - name: Validate and test backend
+        env:
+          DEBUG: "0"
+          SECRET_KEY: ci-only-secret-key
+          ALLOWED_HOSTS: localhost,127.0.0.1
+          WEB_SEARCH_ENABLED: "0"
+          USE_HASH_EMBEDDINGS: "1"
+        run: |
+          python manage.py check
+          python -m pytest -q
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: npm, cache-dependency-path: frontend/package-lock.json }
-      - run: npm ci && npm run build
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
         working-directory: frontend
+        run: |
+          npm ci
+          npm run build
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
+    environment: production
+    env:
+      ALIYUN_HOST: ${{ vars.ALIYUN_HOST || '8.163.67.245' }}
+      ALIYUN_USER: ${{ vars.ALIYUN_USER || 'root' }}
+      ALIYUN_SSH_PORT: ${{ vars.ALIYUN_SSH_PORT || '22' }}
+      ALIYUN_DEPLOY_PATH: ${{ vars.ALIYUN_DEPLOY_PATH || '/opt/medical-rag' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: login-ecr
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
-          tags: type=sha
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      - run: aws ecs describe-task-definition --task-definition "$ECS_TASK_DEFINITION" --query taskDefinition > task-definition.json
-      - uses: aws-actions/amazon-ecs-render-task-definition@v1
-        id: task-def
-        with:
-          task-definition: task-definition.json
-          container-name: backend
-          image: ${{ steps.meta.outputs.tags }}
-      - run: aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --desired-count 1
-      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ALIYUN_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ALIYUN_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Package release
+        env:
+          DEPLOY_ENV_FILE: ${{ secrets.ALIYUN_DEPLOY_ENV_FILE }}
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=.env \
+            --exclude=.venv \
+            --exclude=frontend/node_modules \
+            --exclude=frontend/dist \
+            --exclude=data \
+            --exclude='*.sqlite3' \
+            --exclude='*.pdf' \
+            -czf "release-${GITHUB_SHA}.tar.gz" .
+          printf '%s' "$DEPLOY_ENV_FILE" > deployment.env
+          chmod 600 deployment.env
+      - name: Upload and deploy
+        run: |
+          remote_incoming="${ALIYUN_DEPLOY_PATH}/incoming/${GITHUB_SHA}"
+          ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" "mkdir -p '$remote_incoming'"
+          scp -P "$ALIYUN_SSH_PORT" \
+            "release-${GITHUB_SHA}.tar.gz" deployment.env scripts/deploy_aliyun.sh \
+            "$ALIYUN_USER@$ALIYUN_HOST:$remote_incoming/"
+          ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" \
+            "chmod 700 '$remote_incoming/deploy_aliyun.sh' && '$remote_incoming/deploy_aliyun.sh' '$ALIYUN_DEPLOY_PATH' '$GITHUB_SHA' '$remote_incoming/release-$GITHUB_SHA.tar.gz' '$remote_incoming/deployment.env'"

@@ -44,15 +44,27 @@ class AskView(GenericAPIView):
         question = req.validated_data["question"]
         document_ids = [str(x) for x in req.validated_data.get("document_ids") or []]
         top_k = int(req.validated_data.get("top_k") or 4)
+        retrieval_options = {
+            "use_vector": req.validated_data.get("use_vector", True),
+            "use_graph": req.validated_data.get("use_graph", True),
+            "use_web": req.validated_data.get("use_web", True),
+        }
         try:
             graph = {}
-            try:
-                graph = graph_context_for_question(question)
-                if graph:
-                    graph = {"ok": True, "error": "", **graph}
-            except KgNotConfiguredError as e:
-                graph = {"ok": False, "error": str(e), "keywords": [], "nodes": [], "edges": []}
-            result = ask_question(question=question, document_ids=document_ids or None, top_k=top_k, graph=graph)
+            if retrieval_options["use_graph"]:
+                try:
+                    graph = graph_context_for_question(question)
+                    if graph:
+                        graph = {"ok": True, "error": "", **graph}
+                except KgNotConfiguredError as e:
+                    graph = {"ok": False, "error": str(e), "keywords": [], "nodes": [], "edges": []}
+            result = ask_question(
+                question=question,
+                document_ids=document_ids or None,
+                top_k=top_k,
+                graph=graph,
+                retrieval_options=retrieval_options,
+            )
         except RuntimeError as e:
             return Response({"detail": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         resp = AskResponseSerializer({

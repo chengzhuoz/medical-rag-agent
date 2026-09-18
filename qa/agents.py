@@ -280,11 +280,26 @@ def _normalise_plan_item(name: str, arguments: Any, question: str, document_ids:
     raise ValueError(f"unsupported tool: {name}")
 
 
-def agent_retriever_plan(question: str, route: dict[str, Any], top_k: int, document_ids: list[str] | None) -> list[dict[str, Any]]:
+def agent_retriever_plan(
+    question: str,
+    route: dict[str, Any],
+    top_k: int,
+    document_ids: list[str] | None,
+    retrieval_options: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    retrieval_options = retrieval_options or {"use_vector": True, "use_graph": True, "use_web": True}
+    route = dict(route)
+    route["needs_graph"] = bool(route.get("needs_graph") and retrieval_options.get("use_graph", True))
+    route["needs_rules"] = bool(route.get("needs_rules"))
     normalized_question = _normalise_question(question)
     normalized_document_ids = _normalise_document_ids(document_ids)
     normalized_top_k = _bounded_int(top_k, default=4, minimum=1, maximum=_MAX_RETRIEVAL_TOP_K)
     approved_names, required_tools = _approved_tools(route)
+    if not retrieval_options.get("use_vector", True):
+        approved_names = [name for name in approved_names if name != "search_vectorstore"]
+        required_tools.discard("search_vectorstore")
+    if not retrieval_options.get("use_web", True):
+        approved_names = [name for name in approved_names if name != "web_search"]
     tools_desc = [tool for tool in list_tools_schema() if tool["name"] in approved_names]
     max_calls = min(len(approved_names), int(getattr(settings, "MAS_MAX_TOOL_CALLS", 4)))
     prompt = (
@@ -300,6 +315,7 @@ def agent_retriever_plan(question: str, route: dict[str, Any], top_k: int, docum
     plan = _safe_json(raw, default=None)
 
     fallback = _fallback_plan(normalized_question, normalized_document_ids, normalized_top_k, required_tools)
+    fallback = [call for call in fallback if call["name"] in approved_names]
     if raw.startswith("__LLM_ERROR__") or not isinstance(plan, list):
         logger.warning("retriever_plan_fallback reason=%s", "llm_error" if raw.startswith("__LLM_ERROR__") else "invalid_llm_response")
         return fallback
@@ -486,7 +502,13 @@ def agent_reviewer(question: str, answer: str, contexts: list[dict[str, Any]], g
 
 # --------------------------- 编排入口 ---------------------------
 
-def run_mas_pipeline(question: str, document_ids: list[str] | None, top_k: int, graph: dict[str, Any] | None = None) -> AskResult:
+def run_mas_pipeline(
+    question: str,
+    document_ids: list[str] | None,
+    top_k: int,
+    graph: dict[str, Any] | None = None,
+    retrieval_options: dict[str, bool] | None = None,
+) -> AskResult:
     t = task_create(task_type="qa")
     trace: dict[str, Any] = {"pipeline": "mas", "steps": []}
     try:
@@ -496,7 +518,13 @@ def run_mas_pipeline(question: str, document_ids: list[str] | None, top_k: int, 
         task_info(t, message=f"router intent={route['intent']} graph={route['needs_graph']} rules={route['needs_rules']}")
 
         # 2) Retriever 规划
-        plan = agent_retriever_plan(question, route, top_k=top_k, document_ids=document_ids)
+        plan = agent_retriever_plan(
+            question,
+            route,
+            top_k=top_k,
+            document_ids=document_ids,
+            retrieval_options=retrieval_options,
+        )
         trace["plan"] = plan
         task_info(t, message=f"plan={[c.get('name') for c in plan]}")
 
@@ -531,10 +559,10 @@ def run_mas_pipeline(question: str, document_ids: list[str] | None, top_k: int, 
             elif name == "web_search" and res.get("ok"):
                 web_results = res.get("results") or []
 
-        trace["web_search"] = {"result_count": len(web_results), "used": bool(web_results)}
+        trace["web_search"] = {"result_count": len(web_results), "used": bool(web_results), "results": web_results}
 
         # 兜底：若 plan 没跑向量检索（极端情况），直接补
-        if not contexts:
+        if not contexts and (retrieval_options or {}).get("use_vector", True):
             docs = retrieve_chunks(question=question, document_ids=document_ids, top_k=top_k)
             contexts = format_contexts(docs)
 

@@ -7,6 +7,9 @@ class AskRequestSerializer(serializers.Serializer):
     question = serializers.CharField()
     document_ids = serializers.ListField(child=serializers.UUIDField(), required=False, allow_empty=True)
     top_k = serializers.IntegerField(required=False, min_value=1, max_value=20, default=4)
+    use_vector = serializers.BooleanField(required=False, default=True)
+    use_graph = serializers.BooleanField(required=False, default=True)
+    use_web = serializers.BooleanField(required=False, default=True)
 
 
 class AskResponseSerializer(serializers.Serializer):

@@ -274,11 +274,23 @@ def format_contexts(docs: list[LCDocument]) -> list[dict[str, Any]]:
     ]
 
 
-def ask_question(question: str, document_ids: list[str] | None, top_k: int, graph: dict[str, Any] | None = None) -> AskResult:
+def ask_question(
+    question: str,
+    document_ids: list[str] | None,
+    top_k: int,
+    graph: dict[str, Any] | None = None,
+    retrieval_options: dict[str, bool] | None = None,
+) -> AskResult:
     """问答入口。启用 MAS 时走多智能体编排，否则走单步 GraphRAG。"""
     if getattr(settings, "MAS_ENABLED", False):
         from .agents import run_mas_pipeline
-        return run_mas_pipeline(question=question, document_ids=document_ids, top_k=top_k, graph=graph)
+        return run_mas_pipeline(
+            question=question,
+            document_ids=document_ids,
+            top_k=top_k,
+            graph=graph,
+            retrieval_options=retrieval_options,
+        )
     return _legacy_ask_question(question=question, document_ids=document_ids, top_k=top_k, graph=graph)
 
 
