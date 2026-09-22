@@ -30,7 +30,9 @@ fi
 
 cd "${release_root}"
 export IMAGE_TAG="${release_id}"
-docker compose -p "${project_name}" -f docker-compose.aliyun.yml build --pull
+# 2 GiB ECS 上同时构建前端和后端容易触发 BuildKit 会话竞争；
+# 串行构建更慢一些，但能避免首发阶段的单连接健康检查异常。
+docker compose -p "${project_name}" -f docker-compose.aliyun.yml --parallel 1 build --pull
 docker compose -p "${project_name}" -f docker-compose.aliyun.yml up -d --remove-orphans
 
 healthy=0
