@@ -38,6 +38,7 @@ jobs:
           USE_HASH_EMBEDDINGS: "1"
         run: |
           python manage.py check
+          python manage.py migrate --noinput
           python -m pytest -q
       - uses: actions/setup-node@v4
         with:
