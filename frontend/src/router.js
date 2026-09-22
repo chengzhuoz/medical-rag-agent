@@ -5,6 +5,7 @@ import QaPage from './pages/QaPage.vue'
 import TasksPage from './pages/TasksPage.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import GraphPage from './pages/GraphPage.vue'
+import ObservabilityPage from './pages/ObservabilityPage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/qa', component: QaPage },
     { path: '/graph', component: GraphPage },
     { path: '/tasks', component: TasksPage },
+    { path: '/observability', component: ObservabilityPage },
     { path: '/settings', component: SettingsPage }
   ]
 })

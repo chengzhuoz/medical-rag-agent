@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
+from collections.abc import Callable
 
 from django.conf import settings
 
@@ -15,6 +18,10 @@ from langchain_core.documents import Document as LCDocument
 from langchain_core.embeddings import Embeddings
 
 from monitoring.services import task_create, task_fail, task_info, task_succeed
+from monitoring.metrics import RERANK_CANDIDATES, RERANK_DURATION_SECONDS, RERANK_REQUESTS_TOTAL
+
+
+logger = logging.getLogger(__name__)
 
 
 class HashEmbeddings(Embeddings):
@@ -54,6 +61,9 @@ class HashEmbeddings(Embeddings):
 
 
 _embeddings_cache: Embeddings | None = None
+_reranker_cache: Any | None = None
+_reranker_initialized = False
+_reranker_lock = Lock()
 
 
 def get_embeddings() -> Embeddings:
@@ -133,7 +143,7 @@ def _milvus_embed(texts: list[str], metadatas: list[dict[str, Any]]) -> None:
     client.insert(collection_name=collection, data=rows)
 
 
-def _milvus_retrieve(question: str, document_ids: list[str] | None, top_k: int) -> list[LCDocument]:
+def _milvus_retrieve(question: str, document_ids: list[str] | None, candidate_k: int) -> list[LCDocument]:
     client = _milvus_client()
     collection = settings.MILVUS_COLLECTION
     if not client.has_collection(collection_name=collection):
@@ -147,8 +157,8 @@ def _milvus_retrieve(question: str, document_ids: list[str] | None, top_k: int) 
         collection_name=collection,
         data=[get_embeddings().embed_query(question)],
         anns_field="vector",
-        search_params={"metric_type": "COSINE", "params": {"ef": max(settings.MILVUS_HNSW_EF, top_k)}},
-        limit=max(top_k * 5, top_k),
+        search_params={"metric_type": "COSINE", "params": {"ef": max(settings.MILVUS_HNSW_EF, candidate_k)}},
+        limit=candidate_k,
         filter=expr,
         output_fields=["text", "document_id", "chunk_index", "original_name"],
     )
@@ -159,7 +169,7 @@ def _milvus_retrieve(question: str, document_ids: list[str] | None, top_k: int) 
             page_content=entity.get("text", ""),
             metadata={k: entity.get(k) for k in ("document_id", "chunk_index", "original_name")},
         ))
-    return docs[:top_k]
+    return docs
 
 
 def load_vectorstore() -> FAISS | None:
@@ -249,22 +259,101 @@ class AskResult:
     trace: dict[str, Any] | None = None
 
 
+def _candidate_count(top_k: int) -> int:
+    """为 Cross-Encoder 保留足够候选，避免只对初始 Top K 重排。"""
+    multiplier = max(1, int(getattr(settings, "RERANKER_CANDIDATE_MULTIPLIER", 5)))
+    configured = max(1, int(getattr(settings, "RERANKER_CANDIDATE_K", 20)))
+    return max(top_k, min(max(top_k * multiplier, configured), 100))
+
+
+def get_reranker() -> Any | None:
+    """延迟加载 Cross-Encoder，并缓存失败状态以防每个请求重复下载模型。"""
+    global _reranker_cache, _reranker_initialized
+    if not getattr(settings, "RERANKER_ENABLED", True):
+        return None
+    if _reranker_initialized:
+        return _reranker_cache
+
+    with _reranker_lock:
+        if _reranker_initialized:
+            return _reranker_cache
+        try:
+            from sentence_transformers import CrossEncoder
+
+            _reranker_cache = CrossEncoder(
+                settings.RERANKER_MODEL_NAME,
+                max_length=int(getattr(settings, "RERANKER_MAX_LENGTH", 512)),
+            )
+            logger.info("reranker_loaded model=%s", settings.RERANKER_MODEL_NAME)
+        except Exception:
+            # 重排序是增强层；模型仓库不可达时，保留向量召回结果保证核心问答可用。
+            logger.exception("reranker_unavailable model=%s", settings.RERANKER_MODEL_NAME)
+            _reranker_cache = None
+        finally:
+            _reranker_initialized = True
+    return _reranker_cache
+
+
+def rerank_documents(question: str, candidates: list[LCDocument], top_k: int) -> list[LCDocument]:
+    """使用 query-document Cross-Encoder 分数重排候选，并把评分写入证据元数据。"""
+    import time
+
+    if len(candidates) <= 1:
+        return candidates[:top_k]
+    reranker = get_reranker()
+    if reranker is None:
+        RERANK_REQUESTS_TOTAL.labels(outcome="skipped").inc()
+        return candidates[:top_k]
+    started_at = time.perf_counter()
+    RERANK_CANDIDATES.observe(len(candidates))
+    try:
+        # Cross-Encoder 同时编码问题与全文，比 embedding 相似度更适合判断细粒度相关性。
+        pairs = [(question, document.page_content[:8_000]) for document in candidates]
+        scores = reranker.predict(
+            pairs,
+            batch_size=max(1, int(getattr(settings, "RERANKER_BATCH_SIZE", 8))),
+            show_progress_bar=False,
+        )
+        if len(scores) != len(candidates):
+            raise ValueError("reranker score count does not match candidates")
+        ranked = sorted(enumerate(zip(candidates, scores)), key=lambda item: float(item[1][1]), reverse=True)
+        result: list[LCDocument] = []
+        for rerank_rank, (candidate_rank, (document, score)) in enumerate(ranked[:top_k], start=1):
+            metadata = dict(document.metadata)
+            metadata.update({
+                "retrieval_rank": candidate_rank + 1,
+                "rerank_rank": rerank_rank,
+                "rerank_score": round(float(score), 5),
+            })
+            result.append(LCDocument(page_content=document.page_content, metadata=metadata))
+        RERANK_REQUESTS_TOTAL.labels(outcome="success").inc()
+        RERANK_DURATION_SECONDS.labels(outcome="success").observe(time.perf_counter() - started_at)
+        return result
+    except Exception:
+        logger.exception("reranking_failed candidates=%d", len(candidates))
+        RERANK_REQUESTS_TOTAL.labels(outcome="failed").inc()
+        RERANK_DURATION_SECONDS.labels(outcome="failed").observe(time.perf_counter() - started_at)
+        return candidates[:top_k]
+
+
 def retrieve_chunks(question: str, document_ids: list[str] | None, top_k: int) -> list[LCDocument]:
-    """向量召回 chunk（双路混合检索的“向量路”）。"""
+    """先用 Milvus/FAISS 召回候选，再由 Cross-Encoder 进行精排。"""
+    candidate_k = _candidate_count(top_k)
     if settings.VECTOR_BACKEND == "milvus":
         try:
-            return _milvus_retrieve(question, document_ids, top_k)
+            candidates = _milvus_retrieve(question, document_ids, candidate_k)
+            return rerank_documents(question, candidates, top_k)
         except Exception:
             if not settings.MILVUS_FALLBACK_TO_FAISS:
                 raise
     vs = load_vectorstore()
     if vs is None:
         return []
-    candidates = vs.similarity_search(query=question, k=max(top_k * 5, top_k))
+    candidates = vs.similarity_search(query=question, k=candidate_k)
     if document_ids:
         wanted = set(document_ids)
         candidates = [d for d in candidates if str(d.metadata.get("document_id", "")) in wanted]
-    return candidates[:top_k]
+    return rerank_documents(question, candidates, top_k)
 
 
 def format_contexts(docs: list[LCDocument]) -> list[dict[str, Any]]:
@@ -280,6 +369,9 @@ def ask_question(
     top_k: int,
     graph: dict[str, Any] | None = None,
     retrieval_options: dict[str, bool] | None = None,
+    memory_context: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
+    token_callback: Callable[[str], None] | None = None,
 ) -> AskResult:
     """问答入口。启用 MAS 时走多智能体编排，否则走单步 GraphRAG。"""
     if getattr(settings, "MAS_ENABLED", False):
@@ -290,6 +382,9 @@ def ask_question(
             top_k=top_k,
             graph=graph,
             retrieval_options=retrieval_options,
+            memory_context=memory_context,
+            progress_callback=progress_callback,
+            token_callback=token_callback,
         )
     return _legacy_ask_question(question=question, document_ids=document_ids, top_k=top_k, graph=graph)
 
@@ -360,4 +455,3 @@ def _legacy_ask_question(question: str, document_ids: list[str] | None, top_k: i
     except Exception as e:
         task_fail(t, error=str(e))
         raise
-

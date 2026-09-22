@@ -7,6 +7,7 @@ const items = [
   { to: '/qa', label: '问答' },
   { to: '/graph', label: '图谱' },
   { to: '/tasks', label: '任务' },
+  { to: '/observability', label: '监控' },
   { to: '/settings', label: '设置' }
 ]
 </script>

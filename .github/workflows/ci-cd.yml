@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      ALIYUN_HOST: ${{ vars.ALIYUN_HOST || '8.163.67.245' }}
+      ALIYUN_HOST: ${{ vars.ALIYUN_HOST || '121.41.73.242' }}
       ALIYUN_USER: ${{ vars.ALIYUN_USER || 'root' }}
       ALIYUN_SSH_PORT: ${{ vars.ALIYUN_SSH_PORT || '22' }}
       ALIYUN_DEPLOY_PATH: ${{ vars.ALIYUN_DEPLOY_PATH || '/opt/medical-rag' }}
@@ -75,6 +75,10 @@ jobs:
         env:
           DEPLOY_ENV_FILE: ${{ secrets.ALIYUN_DEPLOY_ENV_FILE }}
         run: |
+          if [[ -z "${DEPLOY_ENV_FILE//[[:space:]]/}" ]]; then
+            echo "ALIYUN_DEPLOY_ENV_FILE is empty. Configure it in the production environment secrets." >&2
+            exit 1
+          fi
           tar \
             --exclude=.git \
             --exclude=.github \
@@ -85,7 +89,8 @@ jobs:
             --exclude=data \
             --exclude='*.sqlite3' \
             --exclude='*.pdf' \
-            -czf "release-${GITHUB_SHA}.tar.gz" .
+            -czf "$RUNNER_TEMP/release-${GITHUB_SHA}.tar.gz" \
+            -C "$GITHUB_WORKSPACE" .
           printf '%s' "$DEPLOY_ENV_FILE" > deployment.env
           chmod 600 deployment.env
       - name: Upload and deploy
@@ -93,7 +98,7 @@ jobs:
           remote_incoming="${ALIYUN_DEPLOY_PATH}/incoming/${GITHUB_SHA}"
           ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" "mkdir -p '$remote_incoming'"
           scp -P "$ALIYUN_SSH_PORT" \
-            "release-${GITHUB_SHA}.tar.gz" deployment.env scripts/deploy_aliyun.sh \
+            "$RUNNER_TEMP/release-${GITHUB_SHA}.tar.gz" deployment.env scripts/deploy_aliyun.sh \
             "$ALIYUN_USER@$ALIYUN_HOST:$remote_incoming/"
           ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" \
             "chmod 700 '$remote_incoming/deploy_aliyun.sh' && '$remote_incoming/deploy_aliyun.sh' '$ALIYUN_DEPLOY_PATH' '$GITHUB_SHA' '$remote_incoming/release-$GITHUB_SHA.tar.gz' '$remote_incoming/deployment.env'"

@@ -10,6 +10,13 @@ class AskRequestSerializer(serializers.Serializer):
     use_vector = serializers.BooleanField(required=False, default=True)
     use_graph = serializers.BooleanField(required=False, default=True)
     use_web = serializers.BooleanField(required=False, default=True)
+    conversation_id = serializers.UUIDField(required=False)
+    memory_scope_id = serializers.UUIDField(required=False)
+    memory_enabled = serializers.BooleanField(required=False, default=True)
+
+
+class MemoryScopeSerializer(serializers.Serializer):
+    memory_scope_id = serializers.UUIDField()
 
 
 class AskResponseSerializer(serializers.Serializer):
@@ -30,4 +37,3 @@ class OllamaStatusSerializer(serializers.Serializer):
     model_available = serializers.BooleanField()
     available_models = serializers.ListField(child=serializers.CharField(), required=False)
     error = serializers.CharField(required=False, allow_blank=True)
-

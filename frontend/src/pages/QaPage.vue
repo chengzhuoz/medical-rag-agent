@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { askQuestion, getOllamaStatus, listDocuments } from '../lib/api'
+import { askQuestionStream, clearMemory, getMemoryOverview, getOllamaStatus, listDocuments } from '../lib/api'
 import { docStatusLabel, statusTagClass } from '../lib/format'
 import ToastHost from '../components/ToastHost.vue'
 import { useRouter } from 'vue-router'
@@ -18,6 +18,12 @@ const toast = ref(null)
 const messages = ref([])
 const chatBody = ref(null)
 const conversationId = ref(crypto.randomUUID())
+const storedMemoryScopeId = localStorage.getItem('medical-rag-memory-scope')
+const memoryScopeId = ref(storedMemoryScopeId || crypto.randomUUID())
+const memoryEnabled = ref(true)
+const memoryOverview = ref(null)
+const runtimeSteps = ref([])
+if (!storedMemoryScopeId) localStorage.setItem('medical-rag-memory-scope', memoryScopeId.value)
 
 // 页面开关会透传到后端 retrieval_options，并由 Retriever 决定实际工具白名单。
 const capabilities = ref({ vector: true, graph: true, web: true })
@@ -36,8 +42,26 @@ const refreshDocs = async () => {
 const refreshOllama = async () => {
   try { ollama.value = await getOllamaStatus() } catch (error) { ollama.value = { ok: false, error: error.message } }
 }
-const newConversation = () => { conversationId.value = crypto.randomUUID(); messages.value = []; result.value = null; question.value = '' }
+const refreshMemoryOverview = async () => {
+  try { memoryOverview.value = await getMemoryOverview(memoryScopeId.value) } catch { memoryOverview.value = null }
+}
+const newConversation = () => {
+  conversationId.value = crypto.randomUUID()
+  messages.value = []
+  result.value = null
+  runtimeSteps.value = []
+  question.value = ''
+}
 const toggle = (key) => { capabilities.value[key] = !capabilities.value[key] }
+const clearLongTermMemory = async () => {
+  if (!window.confirm('将清除当前浏览器范围内的全部短期与长期记忆，确定继续吗？')) return
+  try {
+    await clearMemory(memoryScopeId.value)
+    newConversation()
+    await refreshMemoryOverview()
+    setToast('当前浏览器范围的对话记忆已清除')
+  } catch (error) { setToast(error.message || '清除记忆失败') }
+}
 
 const onAsk = async (preset = '') => {
   const text = (preset || question.value).trim()
@@ -46,25 +70,52 @@ const onAsk = async (preset = '') => {
   question.value = ''
   result.value = null
   asking.value = true
+  runtimeSteps.value = []
+  const assistantMessage = {
+    role: 'assistant',
+    content: '',
+    streaming: true,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  messages.value.push(assistantMessage)
   await scrollLatest()
   try {
-    const response = await askQuestion({
+    await askQuestionStream({
       question: text,
       document_ids: selectedIds.value,
       top_k: topK.value,
       use_vector: capabilities.value.vector,
       use_graph: capabilities.value.graph,
       use_web: capabilities.value.web,
+      conversation_id: conversationId.value,
+      memory_scope_id: memoryScopeId.value,
+      memory_enabled: memoryEnabled.value,
+    }, {
+      onProgress: (progress) => {
+        runtimeSteps.value.push(progress)
+        scrollLatest()
+      },
+      onToken: (token) => {
+        assistantMessage.content += token
+        scrollLatest()
+      },
+      onComplete: (data) => {
+        const response = data.result
+        result.value = response
+        assistantMessage.content = response.answer
+        assistantMessage.streaming = false
+        memoryOverview.value = data.memory
+      },
     })
-    result.value = response
-    messages.value.push({ role: 'assistant', content: response.answer, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })
   } catch (error) {
-    messages.value.push({ role: 'error', content: error.message || '服务暂时不可用，请稍后重试。', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })
+    assistantMessage.role = 'error'
+    assistantMessage.content = error.message || '服务暂时不可用，请稍后重试。'
+    assistantMessage.streaming = false
     setToast(error.message || '问答失败')
   } finally { asking.value = false; await scrollLatest() }
 }
 const openGraph = (center) => { if (center) router.push({ path: '/graph', query: { center } }) }
-onMounted(() => { refreshDocs(); refreshOllama() })
+onMounted(() => { refreshDocs(); refreshOllama(); refreshMemoryOverview() })
 </script>
 
 <template>
@@ -79,6 +130,7 @@ onMounted(() => { refreshDocs(); refreshOllama() })
         <section class="panel-section"><div class="section-heading"><strong>检索能力</strong><span class="tag tag-success">可控</span></div><p class="help">选择本次回答允许使用的数据源。</p>
           <button v-for="item in [{ key: 'vector', icon: '⌁', title: '向量知识库', detail: 'Milvus 语义检索' }, { key: 'graph', icon: '⌘', title: '知识图谱', detail: 'Neo4j 实体关系' }, { key: 'web', icon: '◎', title: '联网搜索', detail: '公开网页时效信息' }]" :key="item.key" class="capability" :class="{ active: capabilities[item.key] }" @click="toggle(item.key)"><span class="cap-icon">{{ item.icon }}</span><span class="cap-copy"><b>{{ item.title }}</b><small>{{ item.detail }}</small></span><i class="switch" /></button>
         </section>
+        <section class="panel-section memory-panel"><div class="section-heading"><strong>对话记忆</strong><span class="tag" :class="{ 'tag-success': memoryEnabled }">{{ memoryEnabled ? '已启用' : '已关闭' }}</span></div><p class="help">短期消息超出窗口后会压缩；长期记忆仅保存在当前浏览器范围，可随时清除。</p><button class="capability" :class="{ active: memoryEnabled }" @click="memoryEnabled = !memoryEnabled"><span class="cap-icon">◌</span><span class="cap-copy"><b>上下文压缩</b><small>{{ memoryEnabled ? '短期 + 长期记忆' : '本轮不读取或写入记忆' }}</small></span><i class="switch" /></button><div class="memory-stats"><span>会话 {{ memoryOverview?.conversations || 0 }}</span><span>长期 {{ memoryOverview?.long_term_memories || 0 }}</span></div><button class="text-button danger-text" :disabled="asking" @click="clearLongTermMemory">清除当前范围记忆</button></section>
         <section class="panel-section"><div class="section-heading"><strong>会话范围</strong><span class="muted">{{ selectedIds.length }} 个文档</span></div><label class="field-label">召回数量 Top K</label><input class="field compact" type="number" min="1" max="20" v-model.number="topK" /><label class="field-label">限定内部文档</label><div class="doc-list"><label v-for="doc in docs" :key="doc.id" class="doc-row"><input type="checkbox" v-model="selected[doc.id]" /><span class="doc-name">{{ doc.original_name }}</span><span :class="statusTagClass(doc.status)">{{ docStatusLabel(doc.status) }}</span></label><div v-if="loadingDocs || !docs.length" class="empty">{{ loadingDocs ? '正在加载…' : '暂无已上传文档' }}</div></div><button class="text-button" @click="refreshDocs">↻ 刷新文档列表</button></section>
         <section class="panel-section health"><div class="section-heading"><strong>系统状态</strong><span class="tag tag-success">在线</span></div><div>Agent 编排 <b>● MAS</b></div><div>模型服务 <b :class="{ offline: !ollama?.ok }">● {{ ollama?.ok ? 'Ollama' : '检查中' }}</b></div><div>搜索 MCP <b>● Ready</b></div></section>
       </aside>
@@ -86,8 +138,8 @@ onMounted(() => { refreshDocs(); refreshOllama() })
         <div class="chat-toolbar"><strong>智能客服 <span>· 多源证据问答</span></strong><small>⌁ 结果仅供研究参考</small></div>
         <div ref="chatBody" class="chat-body">
           <div v-if="!messages.length" class="welcome"><div class="welcome-mark">✦</div><h2>您好，我是医疗知识助手</h2><p>我可以结合内部文档、Neo4j、Milvus 与公开网页，帮助您定位依据并整理答案。</p><div class="suggestions"><button @click="onAsk('医疗器械注册需要关注哪些合规要点？')">⌁ 医疗器械注册合规要点</button><button @click="onAsk('请基于当前知识库说明常见风险与特殊人群注意事项。')">◈ 风险与特殊人群提示</button><button @click="onAsk('请搜索最新的公共卫生相关政策，并标注来源。')">◎ 搜索最新公共卫生政策</button></div></div>
-          <div v-for="(message, index) in messages" :key="index" class="message" :class="message.role"><div v-if="message.role !== 'user'" class="avatar">✦</div><div class="message-main"><small>{{ message.role === 'user' ? '您' : '医疗知识助手' }} · {{ message.time }}</small><div class="bubble"><pre>{{ message.content }}</pre></div></div><div v-if="message.role === 'user'" class="avatar user">您</div></div>
-          <div v-if="asking" class="message"><div class="avatar">✦</div><div class="bubble typing"><i /><i /><i /></div></div>
+          <div v-for="(message, index) in messages" :key="index" class="message" :class="message.role"><div v-if="message.role !== 'user'" class="avatar">✦</div><div class="message-main"><small>{{ message.role === 'user' ? '您' : '医疗知识助手' }} · {{ message.time }}</small><div class="bubble"><pre v-if="message.content">{{ message.content }}</pre><div v-else-if="message.streaming" class="typing"><i /><i /><i /></div></div></div><div v-if="message.role === 'user'" class="avatar user">您</div></div>
+          <section v-if="asking || runtimeSteps.length" class="runtime-trace"><div><strong>运行轨迹</strong><small>展示路由、检索和证据校验状态，不展示模型原始思维链。</small></div><ol><li v-for="(step, index) in runtimeSteps" :key="`${step.step}-${index}`"><b>{{ step.step }}</b><span>{{ step.message }}</span></li><li v-if="asking" class="active"><b>stream</b><span>正在接收回答片段</span></li></ol></section>
         </div>
         <div class="composer-wrap"><div class="source-line"><span>本次启用</span><em v-if="capabilities.vector">⌁ 向量</em><em v-if="capabilities.graph">⌘ Neo4j</em><em v-if="capabilities.web">◎ 联网</em></div><div class="composer"><textarea v-model="question" rows="2" :disabled="asking" maxlength="2000" placeholder="描述您的问题，支持医疗器械、公共卫生和法规检索…" @keydown.enter.exact.prevent="onAsk()" /><button class="send" :disabled="asking || !question.trim()" @click="onAsk">{{ asking ? '检索中' : '发送' }} ↑</button></div><div class="composer-foot"><span>Enter 发送 · Shift + Enter 换行</span><span>{{ question.length }}/2000</span></div></div>
       </main>
@@ -98,4 +150,5 @@ onMounted(() => { refreshDocs(); refreshOllama() })
 
 <style scoped>
 .support-page{--ink:#172033;--subtle:#718096;--line:#e7ecf3;color:var(--ink);min-height:calc(100vh - 80px);background:#f8fafc;border:1px solid #e5eaf1;border-radius:20px;overflow:hidden}.support-header{padding:27px 32px 23px;background:linear-gradient(120deg,#fff,#f4f8ff);display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)}.eyebrow{color:#4775cb;font-size:10px;letter-spacing:.16em;font-weight:800}.live-dot{display:inline-block;width:7px;height:7px;background:#3da879;border-radius:50%;margin-right:7px}.support-header h1{margin:8px 0 3px;font-size:24px;letter-spacing:-.04em}.support-header p{color:var(--subtle);font-size:13px;margin:0}.header-actions{display:flex;align-items:center;gap:15px;color:var(--subtle);font-size:12px}.workspace{display:grid;grid-template-columns:246px minmax(420px,1fr) 295px;min-height:690px}.control-panel,.evidence-panel{background:#fff}.control-panel{border-right:1px solid var(--line)}.evidence-panel{border-left:1px solid var(--line);padding:22px 18px}.panel-section{padding:22px 18px;border-bottom:1px solid var(--line)}.section-heading{display:flex;justify-content:space-between;align-items:center;font-size:13px}.help{color:var(--subtle);font-size:11px;line-height:1.5;margin:7px 0 14px}.tag{display:inline-flex;padding:3px 8px;border-radius:20px;background:#f1f4f8;color:#798597;font-size:10px;font-weight:700}.tag-success{color:#19805b;background:#e8f8f0}.capability{width:100%;padding:10px 9px;display:flex;align-items:center;gap:9px;border:1px solid transparent;background:transparent;border-radius:10px;text-align:left;cursor:pointer}.capability:hover,.capability.active{background:#f6f9ff;border-color:#dce8ff}.cap-icon{width:29px;height:29px;display:grid;place-items:center;border-radius:8px;background:#eff3f8;color:#4778d8;font-size:18px}.cap-copy{flex:1;display:flex;flex-direction:column;gap:1px}.cap-copy b{font-size:12px}.cap-copy small{color:var(--subtle);font-size:10px}.switch{width:24px;height:14px;border-radius:10px;background:#dbe1e9;position:relative}.switch:after{content:'';width:10px;height:10px;border-radius:50%;position:absolute;top:2px;left:2px;background:#fff;transition:transform .15s}.active .switch{background:#4d80e8}.active .switch:after{transform:translateX(10px)}.muted,.section-heading .muted{color:var(--subtle);font-size:11px}.field-label{display:block;color:var(--subtle);font-size:11px;margin:15px 0 6px}.compact{padding:7px 9px;font-size:12px}.doc-list{max-height:165px;overflow:auto}.doc-row{display:flex;align-items:center;gap:6px;padding:7px 0;font-size:11px}.doc-row input{accent-color:#4778d8}.doc-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.empty{color:#9aa5b4;font-size:11px;padding:12px 0}.text-button{border:0;padding:8px 0 0;color:#4778d8;background:none;cursor:pointer;font-size:11px}.health{display:flex;flex-direction:column;gap:11px;color:var(--subtle);font-size:11px}.health b{color:#19805b;float:right}.health .offline{color:#bc7b27}.chat-panel{min-width:0;display:flex;flex-direction:column;background:#fbfcfe}.chat-toolbar{display:flex;justify-content:space-between;align-items:center;padding:17px 25px;background:#fff;border-bottom:1px solid var(--line);font-size:13px}.chat-toolbar strong span,.chat-toolbar small{color:#a0aaba;font-size:10px}.chat-body{flex:1;min-height:400px;max-height:570px;overflow:auto;padding:30px 27px}.welcome{max-width:490px;margin:25px auto;text-align:center}.welcome-mark{width:52px;height:52px;display:grid;place-items:center;margin:0 auto 16px;color:#5381dc;font-size:23px;background:#edf3ff;border-radius:16px}.welcome h2{font-size:19px;margin:0 0 8px}.welcome p{color:var(--subtle);font-size:12px;line-height:1.7;margin:0 auto 22px}.suggestions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.suggestions button{border:1px solid var(--line);background:#fff;border-radius:9px;padding:11px;text-align:left;color:#58677c;font-size:11px;cursor:pointer}.suggestions button:last-child{grid-column:span 2}.message{display:flex;gap:10px;margin-bottom:21px;align-items:flex-start}.message.user{justify-content:flex-end}.avatar{flex:0 0 29px;height:29px;border-radius:9px;display:grid;place-items:center;font-size:11px;background:#eaf1ff;color:#4e7bd3}.avatar.user{background:#303c51;color:#fff}.message-main{max-width:78%}.message-main>small{color:#9aa5b4;font-size:10px}.bubble{border:1px solid var(--line);background:#fff;border-radius:4px 13px 13px 13px;padding:12px 14px;margin-top:5px;box-shadow:0 3px 12px #28374b08}.bubble pre{white-space:pre-wrap;font:inherit;font-size:12px;line-height:1.7;margin:0}.user .bubble{background:#eaf1ff;border-color:#dbe8ff;border-radius:13px 4px 13px 13px}.typing{display:flex;gap:4px;padding:16px}.typing i{width:5px;height:5px;background:#91a0b5;border-radius:50%}.composer-wrap{background:#fff;border-top:1px solid var(--line);padding:12px 22px 16px}.source-line{display:flex;gap:6px;align-items:center;margin-bottom:7px;color:#a0aaba;font-size:10px}.source-line em{font-style:normal;background:#f2f5f9;border-radius:12px;padding:3px 8px;color:#60708a}.composer{border:1px solid #dce3ec;border-radius:11px;display:flex;align-items:flex-end;padding:6px;box-shadow:0 4px 14px #25374e0d}.composer textarea{resize:none;flex:1;border:0;outline:0;padding:8px;font-size:12px;background:transparent}.send{border:0;background:#4778d8;color:#fff;border-radius:8px;padding:9px 11px;font-size:11px;cursor:pointer}.send:disabled{opacity:.5}.composer-foot{display:flex;justify-content:space-between;padding:5px 3px 0;color:#a0aaba;font-size:10px}.evidence-heading{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:17px;border-bottom:1px solid var(--line)}.evidence-heading strong,.evidence-heading small{display:block}.evidence-heading strong{font-size:13px}.evidence-heading small{color:#a0aaba;font-size:10px;margin-top:4px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);padding:15px 0;border-bottom:1px solid var(--line)}.metrics div{text-align:center}.metrics b{display:block;color:#4778d8;font-size:18px}.metrics small{color:var(--subtle);font-size:9px}.route{background:#f5f8ff;border:1px solid #e2eaff;border-radius:8px;padding:11px;margin:15px 0;display:flex;flex-direction:column;gap:3px}.route>*{display:block}.route small{color:#6484c6;font-size:9px;letter-spacing:.12em}.route b{font-size:13px}.route span{color:var(--subtle);font-size:10px}.evidence-block{margin-top:18px}.evidence-block h3{font-size:11px;margin:0 0 8px}.evidence-block h3 small{float:right;color:#9aa5b4;font-weight:500}.keywords{display:flex;flex-wrap:wrap;gap:5px}.keywords button{border:1px solid #e1e8f2;background:#fff;border-radius:5px;padding:4px 7px;color:#58719c;font-size:10px;cursor:pointer}.evidence-block article{border:1px solid var(--line);background:#fff;border-radius:7px;padding:9px;margin-bottom:7px}.evidence-block article b{color:#6981ad;font-size:10px}.evidence-block article p{color:#778397;font-size:10px;line-height:1.55;margin:5px 0 0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.evidence-empty{color:#a0aaba;text-align:center;margin-top:155px;display:flex;flex-direction:column;align-items:center;gap:7px;font-size:11px}.evidence-empty strong{color:#7d9cdb;font-size:38px}.evidence-empty b{color:#748196;font-size:12px}.btn{height:34px;padding:0 13px;border-radius:8px;border:1px solid #dfe5ed;background:#fff;cursor:pointer;font-size:11px;color:#53647a}.btn:disabled{opacity:.6}@media(max-width:1100px){.workspace{grid-template-columns:220px minmax(400px,1fr)}.evidence-panel{display:none}}@media(max-width:700px){.support-header{padding:20px;align-items:flex-start;gap:12px;flex-direction:column}.workspace{display:block}.control-panel{border-right:0;border-bottom:1px solid var(--line)}.panel-section:not(:first-child){display:none}.chat-body{padding:20px 14px}.support-header h1{font-size:20px}.suggestions{grid-template-columns:1fr}.suggestions button:last-child{grid-column:auto}.header-actions{width:100%;justify-content:space-between}}
+.text-button:disabled{opacity:.5;cursor:not-allowed}.danger-text{color:#b45252}.memory-stats{display:flex;justify-content:space-between;margin-top:10px;color:#7b8798;font-size:10px}.runtime-trace{margin:0 0 22px 39px;padding:12px 14px;border:1px solid #dde8fc;border-radius:10px;background:#f7faff;max-width:78%}.runtime-trace strong,.runtime-trace small{display:block}.runtime-trace strong{font-size:11px;color:#3f67ae}.runtime-trace small{margin-top:3px;font-size:10px;line-height:1.45;color:#718096}.runtime-trace ol{margin:10px 0 0;padding:0;list-style:none}.runtime-trace li{display:flex;gap:8px;padding:4px 0;font-size:10px;color:#718096}.runtime-trace li b{min-width:62px;color:#5275b5;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.runtime-trace li.active{color:#3069c7}@media(max-width:700px){.runtime-trace{margin-left:0;max-width:none}}
 </style>

@@ -1,0 +1,26 @@
+groups:
+  - name: medical-rag-agent
+    rules:
+      - alert: MedicalRagHighHttpErrorRate
+        expr: sum(rate(medical_rag_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(medical_rag_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Medical RAG HTTP 5xx rate exceeds 5%
+
+      - alert: MedicalRagQaLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(medical_rag_qa_pipeline_duration_seconds_bucket[5m])) by (le)) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Medical RAG QA pipeline p95 exceeds 10 seconds
+
+      - alert: MedicalRagRerankerUnavailable
+        expr: sum(rate(medical_rag_rerank_requests_total{outcome="failed"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Cross-Encoder reranker is failing

@@ -73,11 +73,66 @@ export function kgSubgraph(center, limit = 80) {
   return apiFetch(`/api/kg/subgraph/?center=${encodeURIComponent(center)}&limit=${encodeURIComponent(limit)}`)
 }
 
-export function askQuestion({ question, document_ids, top_k, use_vector = true, use_graph = true, use_web = true }) {
+export function askQuestion({ question, document_ids, top_k, use_vector = true, use_graph = true, use_web = true, conversation_id, memory_scope_id, memory_enabled = true }) {
   return apiFetch('/api/qa/ask/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, document_ids, top_k, use_vector, use_graph, use_web })
+    body: JSON.stringify({ question, document_ids, top_k, use_vector, use_graph, use_web, conversation_id, memory_scope_id, memory_enabled })
+  })
+}
+
+/**
+ * 消费后端 SSE 问答流。事件仅包含可审计的运行阶段和回答片段，
+ * 不传输或展示模型的隐式推理过程。
+ */
+export async function askQuestionStream(payload, handlers = {}) {
+  const response = await fetch(joinUrl('/api/qa/ask/stream/'), {
+    method: 'POST',
+    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok || !response.body) {
+    const errorPayload = await response.json().catch(() => null)
+    throw new ApiError(errorPayload?.detail || `请求失败（${response.status}）`, response.status, errorPayload)
+  }
+
+  const decoder = new TextDecoder('utf-8')
+  const reader = response.body.getReader()
+  let buffer = ''
+
+  const dispatch = (frame) => {
+    const lines = frame.replace(/\r/g, '').split('\n')
+    const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message'
+    const rawData = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
+    if (!rawData) return
+    let data
+    try { data = JSON.parse(rawData) } catch { return }
+    if (event === 'progress') handlers.onProgress?.(data)
+    if (event === 'token') handlers.onToken?.(data.token || '')
+    if (event === 'complete') handlers.onComplete?.(data)
+    if (event === 'error') throw new ApiError(data.detail || '流式问答失败', 500, data)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const frames = buffer.split(/\n\n/)
+    buffer = frames.pop() || ''
+    frames.forEach(dispatch)
+    if (done) break
+  }
+  if (buffer.trim()) dispatch(buffer)
+}
+
+export function getMemoryOverview(memoryScopeId) {
+  return apiFetch(`/api/qa/memory/overview/?memory_scope_id=${encodeURIComponent(memoryScopeId)}`)
+}
+
+export function clearMemory(memoryScopeId) {
+  return apiFetch('/api/qa/memory/clear/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ memory_scope_id: memoryScopeId })
   })
 }
 
@@ -87,6 +142,10 @@ export function listTasks() {
 
 export function getTask(id) {
   return apiFetch(`/api/monitoring/tasks/${id}/`)
+}
+
+export function getObservabilityOverview() {
+  return apiFetch('/api/monitoring/overview/')
 }
 
 export function getOllamaStatus() {

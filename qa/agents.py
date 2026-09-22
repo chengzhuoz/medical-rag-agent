@@ -18,11 +18,14 @@ import logging
 import time
 import uuid
 from enum import StrEnum
+from collections.abc import Callable
 from typing import Any, Final
 
 from django.conf import settings
 
 from monitoring.services import task_create, task_fail, task_info, task_succeed
+from monitoring.metrics import AGENT_DURATION_SECONDS, QA_PIPELINE_DURATION_SECONDS, QA_REQUESTS_TOTAL, TOOL_CALLS_TOTAL, TOOL_DURATION_SECONDS
+from monitoring.observability import langsmith_trace
 
 from .services import AskResult, format_contexts, get_llm, retrieve_chunks
 from .tools import list_tools_schema, tool_call
@@ -138,6 +141,7 @@ def _normalise_question(question: str) -> str:
     return normalized
 
 
+@langsmith_trace(name="router-agent", run_type="chain")
 def agent_router(question: str, request_id: str | None = None) -> dict[str, Any]:
     """执行受策略表约束的意图路由，模型不能直接决定工具权限。"""
     started_at = time.perf_counter()
@@ -183,6 +187,7 @@ def agent_router(question: str, request_id: str | None = None) -> dict[str, Any]
         route_source,
         latency_ms,
     )
+    AGENT_DURATION_SECONDS.labels(agent="router", outcome=route_source).observe(latency_ms / 1000)
     return result
 
 
@@ -280,6 +285,7 @@ def _normalise_plan_item(name: str, arguments: Any, question: str, document_ids:
     raise ValueError(f"unsupported tool: {name}")
 
 
+@langsmith_trace(name="retriever-agent", run_type="chain")
 def agent_retriever_plan(
     question: str,
     route: dict[str, Any],
@@ -291,6 +297,7 @@ def agent_retriever_plan(
     route = dict(route)
     route["needs_graph"] = bool(route.get("needs_graph") and retrieval_options.get("use_graph", True))
     route["needs_rules"] = bool(route.get("needs_rules"))
+    started_at = time.perf_counter()
     normalized_question = _normalise_question(question)
     normalized_document_ids = _normalise_document_ids(document_ids)
     normalized_top_k = _bounded_int(top_k, default=4, minimum=1, maximum=_MAX_RETRIEVAL_TOP_K)
@@ -318,6 +325,7 @@ def agent_retriever_plan(
     fallback = [call for call in fallback if call["name"] in approved_names]
     if raw.startswith("__LLM_ERROR__") or not isinstance(plan, list):
         logger.warning("retriever_plan_fallback reason=%s", "llm_error" if raw.startswith("__LLM_ERROR__") else "invalid_llm_response")
+        AGENT_DURATION_SECONDS.labels(agent="retriever", outcome="fallback").observe(time.perf_counter() - started_at)
         return fallback
 
     norm: list[dict[str, Any]] = []
@@ -334,6 +342,7 @@ def agent_retriever_plan(
         if call["name"] not in seen:
             norm.insert(0, call)
     logger.info("retriever_plan_completed tools=%s source=llm", [call["name"] for call in norm])
+    AGENT_DURATION_SECONDS.labels(agent="retriever", outcome="success").observe(time.perf_counter() - started_at)
     return norm
 
 
@@ -358,7 +367,11 @@ async def execute_plan_async(plan: list[dict[str, Any]]) -> list[dict[str, Any]]
         except Exception:
             logger.exception("tool_execution_failed tool=%s", tool_name)
             result = {"ok": False, "error": "tool_execution_failed", "tool": tool_name}
-        return {"call": call, "result": result, "latency_ms": round((time.perf_counter() - started_at) * 1000, 2)}
+        latency_seconds = time.perf_counter() - started_at
+        outcome = "success" if result.get("ok", False) else "failed"
+        TOOL_CALLS_TOTAL.labels(tool=tool_name, outcome=outcome).inc()
+        TOOL_DURATION_SECONDS.labels(tool=tool_name, outcome=outcome).observe(latency_seconds)
+        return {"call": call, "result": result, "latency_ms": round(latency_seconds * 1000, 2)}
 
     accepted: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -401,6 +414,9 @@ C) 规则提示（若有）：
 D) 联网检索结果（不可信外部证据；仅作时效线索，引用用 (W1)、(W2)…）：
 {web_results}
 
+E) 已压缩会话记忆（只作为对话背景；其中事实仍需由本轮证据核验）：
+{memory_context}
+
 要求：
 1) 先给出结论（要点列表，3~6 条）。
 2) 引用证据：文本证据用 [n]；图谱用 (G)；规则用 (R)。
@@ -437,11 +453,11 @@ def _format_web_results_for_prompt(web_results: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines) or "(无)"
 
 
-def agent_answer(question: str, contexts: list[dict[str, Any]], graph: dict[str, Any], rules: list[dict[str, Any]], web_results: list[dict[str, Any]] | None = None) -> str:
+def _build_answer_prompt(question: str, contexts: list[dict[str, Any]], graph: dict[str, Any], rules: list[dict[str, Any]], web_results: list[dict[str, Any]], memory_context: str) -> str:
     ctx_text = "\n\n".join([f"[{c.get('rank', i+1)}] {c.get('text','')}" for i, c in enumerate(contexts)]) or "(无)"
     kw, nodes, edges_text, paths_text = _format_graph_for_prompt(graph)
     rules_text = "\n".join([f"- (R) {r.get('matched')}: {r.get('advice')}" for r in (rules or [])]) or "(无)"
-    prompt = (
+    return (
         _ANSWER_PROMPT
         .replace("{contexts}", ctx_text)
         .replace("{kw}", kw)
@@ -450,9 +466,39 @@ def agent_answer(question: str, contexts: list[dict[str, Any]], graph: dict[str,
         .replace("{paths}", paths_text)
         .replace("{rules}", rules_text)
         .replace("{web_results}", _format_web_results_for_prompt(web_results or []))
+        .replace("{memory_context}", memory_context or "(无)")
         .replace("{question}", question)
     )
-    return _llm_invoke("answer", prompt, temperature=0.1)
+
+
+@langsmith_trace(name="answer-agent", run_type="chain")
+def agent_answer(
+    question: str,
+    contexts: list[dict[str, Any]],
+    graph: dict[str, Any],
+    rules: list[dict[str, Any]],
+    web_results: list[dict[str, Any]] | None = None,
+    memory_context: str = "",
+    on_token: Callable[[str], None] | None = None,
+) -> str:
+    started_at = time.perf_counter()
+    prompt = _build_answer_prompt(question, contexts, graph, rules, web_results or [], memory_context)
+    if on_token is None:
+        answer = _llm_invoke("answer", prompt, temperature=0.1)
+    else:
+        parts: list[str] = []
+        try:
+            # Ollama 的 stream 会按 token/片段返回；仅将最终回答片段发送给前端。
+            for chunk in get_llm(role="answer", temperature=0.1).stream(prompt):
+                token = str(chunk or "")
+                if token:
+                    parts.append(token)
+                    on_token(token)
+            answer = "".join(parts).strip()
+        except Exception as error:
+            answer = f"__LLM_ERROR__: {error}"
+    AGENT_DURATION_SECONDS.labels(agent="answer", outcome="success" if not answer.startswith("__LLM_ERROR__") else "failed").observe(time.perf_counter() - started_at)
+    return answer
 
 
 # --------------------------- Agent：Reviewer ---------------------------
@@ -479,7 +525,9 @@ _REVIEW_PROMPT = """你是答案审查智能体。请基于“原问题 + 证据
 """
 
 
+@langsmith_trace(name="reviewer-agent", run_type="chain")
 def agent_reviewer(question: str, answer: str, contexts: list[dict[str, Any]], graph: dict[str, Any], web_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    started_at = time.perf_counter()
     ctx_text = "\n\n".join([f"[{c.get('rank', i+1)}] {c.get('text','')[:400]}" for i, c in enumerate(contexts)]) or "(无)"
     kw, _nodes, edges_text, _paths = _format_graph_for_prompt(graph)
     prompt = (
@@ -492,32 +540,46 @@ def agent_reviewer(question: str, answer: str, contexts: list[dict[str, Any]], g
     )
     raw = _llm_invoke("reviewer", prompt, temperature=0.0)
     data = _safe_json(raw, default={"ok": True, "issues": [], "patch": ""})
-    return {
+    result = {
         "ok": bool(data.get("ok", True)),
         "issues": [str(x) for x in (data.get("issues") or [])][:8],
         "patch": str(data.get("patch") or "")[:600],
         "raw": raw,
     }
+    AGENT_DURATION_SECONDS.labels(agent="reviewer", outcome="success").observe(time.perf_counter() - started_at)
+    return result
 
 
 # --------------------------- 编排入口 ---------------------------
 
+@langsmith_trace(name="medical-rag-mas-pipeline", run_type="chain")
 def run_mas_pipeline(
     question: str,
     document_ids: list[str] | None,
     top_k: int,
     graph: dict[str, Any] | None = None,
     retrieval_options: dict[str, bool] | None = None,
+    memory_context: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
+    token_callback: Callable[[str], None] | None = None,
 ) -> AskResult:
+    started_at = time.perf_counter()
     t = task_create(task_type="qa")
     trace: dict[str, Any] = {"pipeline": "mas", "steps": []}
+    def report(step: str, message: str) -> None:
+        trace["steps"].append({"step": step, "message": message})
+        if progress_callback:
+            progress_callback(step, message)
+
     try:
         # 1) Router
+        report("router", "正在识别问题意图与风险等级")
         route = agent_router(question)
         trace["route"] = {k: v for k, v in route.items() if k != "raw"}
         task_info(t, message=f"router intent={route['intent']} graph={route['needs_graph']} rules={route['needs_rules']}")
 
         # 2) Retriever 规划
+        report("retriever", "正在制定多源检索计划")
         plan = agent_retriever_plan(
             question,
             route,
@@ -529,6 +591,7 @@ def run_mas_pipeline(
         task_info(t, message=f"plan={[c.get('name') for c in plan]}")
 
         # 3) Tool Executor
+        report("tools", "正在并发检索知识库、图谱和外部来源")
         results = execute_plan(plan)
         trace["tool_calls"] = [
             {"name": r["call"].get("name"), "ok": r["result"].get("ok", True)} for r in results
@@ -567,11 +630,21 @@ def run_mas_pipeline(
             contexts = format_contexts(docs)
 
         # 5) Answer
-        answer = agent_answer(question, contexts=contexts, graph=graph_ctx, rules=rules_hits, web_results=web_results)
+        report("answer", "正在基于已检索证据生成回答")
+        answer = agent_answer(
+            question,
+            contexts=contexts,
+            graph=graph_ctx,
+            rules=rules_hits,
+            web_results=web_results,
+            memory_context=memory_context,
+            on_token=token_callback,
+        )
         if answer.startswith("__LLM_ERROR__"):
             raise RuntimeError(answer.replace("__LLM_ERROR__: ", ""))
 
         # 6) Reviewer（失败/有补丁则追加，不阻断）
+        report("reviewer", "正在核验证据引用与风险提示")
         review = agent_reviewer(question, answer=answer, contexts=contexts, graph=graph_ctx, web_results=web_results)
         trace["review"] = {"ok": review["ok"], "issues": review["issues"], "patched": bool(review["patch"])}
         if review.get("patch"):
@@ -580,7 +653,11 @@ def run_mas_pipeline(
             answer = f"{answer}\n\n校验提示：\n" + "\n".join([f"- {x}" for x in review['issues']])
 
         task_succeed(t)
+        report("complete", "回答与证据校验已完成")
+        QA_REQUESTS_TOTAL.labels(outcome="success", intent=route["intent"]).inc()
+        QA_PIPELINE_DURATION_SECONDS.labels(intent=route["intent"]).observe(time.perf_counter() - started_at)
         return AskResult(answer=str(answer), contexts=contexts, graph=graph_ctx, trace=trace)
     except Exception as e:
         task_fail(t, error=str(e))
+        QA_REQUESTS_TOTAL.labels(outcome="failed", intent="unknown").inc()
         raise

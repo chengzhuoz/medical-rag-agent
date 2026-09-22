@@ -1,0 +1,75 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "title": "HTTP 请求速率",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(medical_rag_http_requests_total[5m]))", "legendFormat": "requests/s", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "title": "问答 P95 延迟",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(medical_rag_qa_pipeline_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "id": 3,
+      "title": "问答结果",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(medical_rag_qa_requests_total[5m])) by (outcome)", "legendFormat": "{{outcome}}", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "id": 4,
+      "title": "Agent P95 延迟",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(medical_rag_agent_duration_seconds_bucket[5m])) by (le, agent))", "legendFormat": "{{agent}}", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "id": 5,
+      "title": "工具调用 P95 延迟",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(medical_rag_tool_duration_seconds_bucket[5m])) by (le, tool))", "legendFormat": "{{tool}}", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 6,
+      "title": "重排序成功与降级",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(medical_rag_rerank_requests_total[5m])) by (outcome)", "legendFormat": "{{outcome}}", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 7,
+      "title": "HTTP 5xx 速率",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(medical_rag_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "5xx/s", "refId": "A"}]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["medical-rag", "agents", "observability"],
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Medical RAG Agent Overview",
+  "uid": "medical-rag-overview",
+  "version": 1
+}
