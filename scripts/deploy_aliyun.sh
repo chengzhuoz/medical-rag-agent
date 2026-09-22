@@ -30,6 +30,10 @@ fi
 
 cd "${release_root}"
 export IMAGE_TAG="${release_id}"
+# 当前 ECS 的 BuildKit 会话健康检查不稳定，使用单进程 Legacy Builder。
+# 该设置只影响本次部署构建，不改变应用运行时配置。
+export DOCKER_BUILDKIT=0
+export COMPOSE_DOCKER_CLI_BUILD=0
 # Compose v5 会通过 Buildx Bake 为多个服务创建共享会话；部分 ECS Docker
 # 版本只允许一个会话，容易出现“only one connection allowed”。逐个 docker
 # build 后让 Compose 只负责启动已构建镜像，首发部署更稳定。
