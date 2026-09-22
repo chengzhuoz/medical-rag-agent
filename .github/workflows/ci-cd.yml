@@ -96,10 +96,11 @@ jobs:
           chmod 600 deployment.env
       - name: Upload and deploy
         run: |
+          ssh_opts=(-o ServerAliveInterval=15 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes -o ConnectTimeout=20)
           remote_incoming="${ALIYUN_DEPLOY_PATH}/incoming/${GITHUB_SHA}"
-          ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" "mkdir -p '$remote_incoming'"
-          scp -P "$ALIYUN_SSH_PORT" \
+          ssh "${ssh_opts[@]}" -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" "mkdir -p '$remote_incoming'"
+          scp "${ssh_opts[@]}" -P "$ALIYUN_SSH_PORT" \
             "$RUNNER_TEMP/release-${GITHUB_SHA}.tar.gz" deployment.env scripts/deploy_aliyun.sh \
             "$ALIYUN_USER@$ALIYUN_HOST:$remote_incoming/"
-          ssh -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" \
+          ssh "${ssh_opts[@]}" -p "$ALIYUN_SSH_PORT" "$ALIYUN_USER@$ALIYUN_HOST" \
             "chmod 700 '$remote_incoming/deploy_aliyun.sh' && '$remote_incoming/deploy_aliyun.sh' '$ALIYUN_DEPLOY_PATH' '$GITHUB_SHA' '$remote_incoming/release-$GITHUB_SHA.tar.gz' '$remote_incoming/deployment.env'"
