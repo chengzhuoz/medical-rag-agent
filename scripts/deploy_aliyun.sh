@@ -30,10 +30,12 @@ fi
 
 cd "${release_root}"
 export IMAGE_TAG="${release_id}"
-# 2 GiB ECS 上同时构建前端和后端容易触发 BuildKit 会话竞争；
-# 串行构建更慢一些，但能避免首发阶段的单连接健康检查异常。
-docker compose -p "${project_name}" -f docker-compose.aliyun.yml --parallel 1 build --pull
-docker compose -p "${project_name}" -f docker-compose.aliyun.yml up -d --remove-orphans
+# Compose v5 会通过 Buildx Bake 为多个服务创建共享会话；部分 ECS Docker
+# 版本只允许一个会话，容易出现“only one connection allowed”。逐个 docker
+# build 后让 Compose 只负责启动已构建镜像，首发部署更稳定。
+docker build --pull -t "medical-rag-backend:${release_id}" "${release_root}"
+docker build --pull -t "medical-rag-frontend:${release_id}" "${release_root}/frontend"
+docker compose -p "${project_name}" -f docker-compose.aliyun.yml up -d --no-build --remove-orphans
 
 healthy=0
 for attempt in $(seq 1 30); do
